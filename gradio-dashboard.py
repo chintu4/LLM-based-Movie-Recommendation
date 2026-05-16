@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 
 import gradio as gr
 
-from langchain_openai import OpenAIEmbeddings
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_chroma import Chroma
 from langchain.schema import Document
 
@@ -128,7 +128,7 @@ def build_documents(dataframe: pd.DataFrame) -> list[Document]:
         )
     return docs
 
-embeddings = OpenAIEmbeddings()
+embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
 
 # Persist so you don't re-embed every run
 if os.path.isdir(CHROMA_DIR) and os.listdir(CHROMA_DIR):
