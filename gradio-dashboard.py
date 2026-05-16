@@ -39,10 +39,42 @@ def pick_first(existing_cols, candidates):
             return c
     return None
 
-id_col = pick_first(df.columns, ["movieId", "movie_id", "id", "isbn13", "index"])
-title_col = pick_first(df.columns, ["title", "movie_title", "name"])
-desc_col = pick_first(df.columns, ["description", "plot", "overview", "tagline"])
-genre_col = pick_first(df.columns, ["simple_categories", "genre", "genres", "Genre"])
+# Print columns to make dataset mismatches obvious in hosted envs
+print(f"Loaded CSV: {DATA_PATH}")
+print("CSV columns:", list(df.columns))
+
+id_col = pick_first(df.columns, ["movieId", "movie_id", "id", "tmdb_id", "imdb_id", "isbn13", "index"])
+
+# Notebooks in this repo use Title (capital T), Overview, Genre
+# so include those common variants too.
+title_col = pick_first(df.columns, [
+    "title",
+    "Title",
+    "movie_title",
+    "name",
+    "original_title",
+    "primaryTitle",
+    "title_and_subtitle",
+])
+
+desc_col = pick_first(df.columns, [
+    "description",
+    "plot",
+    "overview",
+    "Overview",
+    "tagline",
+    "summary",
+    "Synopsis",
+    "tagged_description",
+])
+
+genre_col = pick_first(df.columns, [
+    "simple_categories",
+    "simple_Genre",
+    "genre",
+    "genres",
+    "Genre",
+])
 
 # Emotion columns (optional)
 emotion_cols = {
@@ -62,7 +94,7 @@ if id_col is None:
 if title_col is None:
     # Must have something to show in UI
     raise ValueError(
-        "Could not find a title column. Expected one of: title, movie_title, name."
+        f"Could not find a title column. CSV has columns: {list(df.columns)}"
     )
 
 if desc_col is None:
@@ -142,6 +174,7 @@ def retrieve_semantic_recommendations(
 
     return working.head(final_top_k)
 
+
 def recommend_movies(query: str, category: str, tone: str):
     recommendations = retrieve_semantic_recommendations(query, category, tone)
     results = []
@@ -150,7 +183,9 @@ def recommend_movies(query: str, category: str, tone: str):
         title = str(row.get(title_col, "Untitled"))
         desc = str(row.get(desc_col, "") or "")
         desc_words = desc.split()
-        truncated_description = " ".join(desc_words[:30]) + ("..." if len(desc_words) > 30 else "")
+        truncated_description = " ".join(desc_words[:30]) + (
+            "..." if len(desc_words) > 30 else ""
+        )
 
         caption_parts = [title]
         if genre_col is not None:
@@ -163,12 +198,15 @@ def recommend_movies(query: str, category: str, tone: str):
 
     return results
 
+
 # -----------------------
 # UI
 # -----------------------
 categories = ["All"]
 if genre_col is not None:
-    categories += sorted([c for c in df[genre_col].dropna().astype(str).unique() if c.strip()])
+    categories += sorted(
+        [c for c in df[genre_col].dropna().astype(str).unique() if c.strip()]
+    )
 
 tones = ["All"] + list(available_emotions.keys())
 
