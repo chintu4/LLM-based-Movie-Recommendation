@@ -1,106 +1,205 @@
+import os
 import pandas as pd
 import numpy as np
 from dotenv import load_dotenv
 
-from langchain_community.document_loaders import TextLoader
-from langchain_openai import OpenAIEmbeddings
-from langchain_text_splitters import CharacterTextSplitter
-from langchain_chroma import Chroma
-
 import gradio as gr
+
+from langchain_openai import OpenAIEmbeddings
+from langchain_chroma import Chroma
+from langchain.schema import Document
 
 load_dotenv()
 
-books = pd.read_csv("movies_with_emotions.csv")
-books["large_thumbnail"] = books["thumbnail"] + "&fife=w800"
-books["large_thumbnail"] = np.where(
-    books["large_thumbnail"].isna(),
-    "cover-not-found.jpg",
-    books["large_thumbnail"],
-)
+DATA_PATH = os.getenv("MOVIES_CSV", "movies_with_emotions.csv")
+CHROMA_DIR = os.getenv("CHROMA_DIR", "chroma_movies_db")
 
-raw_documents = TextLoader("tagged_description.txt").load()
-text_splitter = CharacterTextSplitter(separator="\n", chunk_size=0, chunk_overlap=0)
-documents = text_splitter.split_documents(raw_documents)
-db_books = Chroma.from_documents(documents, OpenAIEmbeddings())
+# -----------------------
+# Load dataset
+# -----------------------
+df = pd.read_csv(DATA_PATH)
 
+# Thumbnail handling (keep your existing behavior, but be defensive)
+if "thumbnail" in df.columns:
+    df["large_thumbnail"] = df["thumbnail"].astype(str) + "&fife=w800"
+    df["large_thumbnail"] = np.where(
+        df["thumbnail"].isna() | (df["thumbnail"].astype(str).str.strip() == ""),
+        "cover-not-found.jpg",
+        df["large_thumbnail"],
+    )
+else:
+    df["large_thumbnail"] = "cover-not-found.jpg"
 
+# -----------------------
+# Figure out key columns safely
+# -----------------------
+def pick_first(existing_cols, candidates):
+    for c in candidates:
+        if c in existing_cols:
+            return c
+    return None
+
+id_col = pick_first(df.columns, ["movieId", "movie_id", "id", "isbn13", "index"])
+title_col = pick_first(df.columns, ["title", "movie_title", "name"])
+desc_col = pick_first(df.columns, ["description", "plot", "overview", "tagline"])
+genre_col = pick_first(df.columns, ["simple_categories", "genre", "genres", "Genre"])
+
+# Emotion columns (optional)
+emotion_cols = {
+    "Happy": "joy",
+    "Surprising": "surprise",
+    "Angry": "anger",
+    "Suspenseful": "fear",
+    "Sad": "sadness",
+}
+available_emotions = {k: v for k, v in emotion_cols.items() if v in df.columns}
+
+# If no usable ID column, create one from row index
+if id_col is None:
+    df = df.reset_index().rename(columns={"index": "row_id"})
+    id_col = "row_id"
+
+if title_col is None:
+    # Must have something to show in UI
+    raise ValueError(
+        "Could not find a title column. Expected one of: title, movie_title, name."
+    )
+
+if desc_col is None:
+    # We can still do semantic search, but results will be weaker; create an empty description
+    df["description"] = ""
+    desc_col = "description"
+
+# -----------------------
+# Build / load vector DB from the CSV itself
+# (no tagged_description.txt needed)
+# -----------------------
+def build_documents(dataframe: pd.DataFrame) -> list[Document]:
+    docs = []
+    for _, row in dataframe.iterrows():
+        movie_id = row.get(id_col)
+        title = str(row.get(title_col, "")).strip()
+        desc = str(row.get(desc_col, "")).strip()
+
+        # Add optional genre/category into the indexed text
+        genre_val = str(row.get(genre_col, "")).strip() if genre_col else ""
+
+        text = f"{title}\n{genre_val}\n{desc}".strip()
+        if not text:
+            continue
+
+        docs.append(
+            Document(
+                page_content=text,
+                metadata={"movie_id": str(movie_id)},
+            )
+        )
+    return docs
+
+embeddings = OpenAIEmbeddings()
+
+# Persist so you don't re-embed every run
+if os.path.isdir(CHROMA_DIR) and os.listdir(CHROMA_DIR):
+    db = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
+else:
+    docs = build_documents(df)
+    db = Chroma.from_documents(docs, embeddings, persist_directory=CHROMA_DIR)
+
+# -----------------------
+# Recommender
+# -----------------------
 def retrieve_semantic_recommendations(
-        query: str,
-        category: str = None,
-        tone: str = None,
-        initial_top_k: int = 50,
-        final_top_k: int = 16,
+    query: str,
+    category: str = "All",
+    tone: str = "All",
+    initial_top_k: int = 50,
+    final_top_k: int = 16,
 ) -> pd.DataFrame:
+    if not query or not query.strip():
+        return df.head(0)
 
-    recs = db_books.similarity_search(query, k=initial_top_k)
-    books_list = [int(rec.page_content.strip('"').split()[0]) for rec in recs]
-    book_recs = books[books["isbn13"].isin(books_list)].head(initial_top_k)
+    recs = db.similarity_search(query, k=initial_top_k)
 
-    if category != "All":
-        book_recs = book_recs[book_recs["simple_categories"] == category].head(final_top_k)
-    else:
-        book_recs = book_recs.head(final_top_k)
+    movie_ids = []
+    for r in recs:
+        mid = r.metadata.get("movie_id")
+        if mid is not None:
+            movie_ids.append(str(mid))
 
-    if tone == "Happy":
-        book_recs.sort_values(by="joy", ascending=False, inplace=True)
-    elif tone == "Surprising":
-        book_recs.sort_values(by="surprise", ascending=False, inplace=True)
-    elif tone == "Angry":
-        book_recs.sort_values(by="anger", ascending=False, inplace=True)
-    elif tone == "Suspenseful":
-        book_recs.sort_values(by="fear", ascending=False, inplace=True)
-    elif tone == "Sad":
-        book_recs.sort_values(by="sadness", ascending=False, inplace=True)
+    # Filter matching rows
+    # (convert both sides to string to avoid dtype mismatch)
+    working = df[df[id_col].astype(str).isin(movie_ids)].copy()
 
-    return book_recs
+    # Category filter (only if we have a category column)
+    if category != "All" and genre_col is not None:
+        working = working[working[genre_col].astype(str) == str(category)].copy()
 
+    # Tone sorting (only if emotion columns exist)
+    if tone in available_emotions:
+        emotion_col = available_emotions[tone]
+        # Use assignment (avoid inplace warnings)
+        working = working.sort_values(by=emotion_col, ascending=False)
 
-def recommend_books(
-        query: str,
-        category: str,
-        tone: str
-):
+    return working.head(final_top_k)
+
+def recommend_movies(query: str, category: str, tone: str):
     recommendations = retrieve_semantic_recommendations(query, category, tone)
     results = []
 
     for _, row in recommendations.iterrows():
-        description = row["description"]
-        truncated_desc_split = description.split()
-        truncated_description = " ".join(truncated_desc_split[:30]) + "..."
+        title = str(row.get(title_col, "Untitled"))
+        desc = str(row.get(desc_col, "") or "")
+        desc_words = desc.split()
+        truncated_description = " ".join(desc_words[:30]) + ("..." if len(desc_words) > 30 else "")
 
-        authors_split = row["authors"].split(";")
-        if len(authors_split) == 2:
-            authors_str = f"{authors_split[0]} and {authors_split[1]}"
-        elif len(authors_split) > 2:
-            authors_str = f"{', '.join(authors_split[:-1])}, and {authors_split[-1]}"
-        else:
-            authors_str = row["authors"]
+        caption_parts = [title]
+        if genre_col is not None:
+            caption_parts.append(f"({row.get(genre_col, '')})")
+        if truncated_description.strip():
+            caption_parts.append(f": {truncated_description}")
 
-        caption = f"{row['title']} by {authors_str}: {truncated_description}"
-        results.append((row["large_thumbnail"], caption))
+        caption = " ".join([p for p in caption_parts if str(p).strip()])
+        results.append((row.get("large_thumbnail", "cover-not-found.jpg"), caption))
+
     return results
 
-categories = ["All"] + sorted(books["simple_categories"].unique())
-tones = ["All"] + ["Happy", "Surprising", "Angry", "Suspenseful", "Sad"]
+# -----------------------
+# UI
+# -----------------------
+categories = ["All"]
+if genre_col is not None:
+    categories += sorted([c for c in df[genre_col].dropna().astype(str).unique() if c.strip()])
 
-with gr.Blocks(theme = gr.themes.Glass()) as dashboard:
-    gr.Markdown("# Semantic book recommender")
+tones = ["All"] + list(available_emotions.keys())
+
+with gr.Blocks(theme=gr.themes.Glass()) as dashboard:
+    gr.Markdown("# Semantic movie recommender")
 
     with gr.Row():
-        user_query = gr.Textbox(label = "Please enter a description of a book:",
-                                placeholder = "e.g., A story about forgiveness")
-        category_dropdown = gr.Dropdown(choices = categories, label = "Select a category:", value = "All")
-        tone_dropdown = gr.Dropdown(choices = tones, label = "Select an emotional tone:", value = "All")
+        user_query = gr.Textbox(
+            label="Describe a movie you want:",
+            placeholder="e.g., A suspenseful story about survival and betrayal",
+        )
+        category_dropdown = gr.Dropdown(
+            choices=categories,
+            label="Select a category/genre:",
+            value="All",
+        )
+        tone_dropdown = gr.Dropdown(
+            choices=tones,
+            label="Select an emotional tone:",
+            value="All",
+        )
         submit_button = gr.Button("Find recommendations")
 
     gr.Markdown("## Recommendations")
-    output = gr.Gallery(label = "Recommended books", columns = 8, rows = 2)
+    output = gr.Gallery(label="Recommended movies", columns=4, rows=4)
 
-    submit_button.click(fn = recommend_books,
-                        inputs = [user_query, category_dropdown, tone_dropdown],
-                        outputs = output)
-
+    submit_button.click(
+        fn=recommend_movies,
+        inputs=[user_query, category_dropdown, tone_dropdown],
+        outputs=output,
+    )
 
 if __name__ == "__main__":
     dashboard.launch()
