@@ -19,16 +19,16 @@ CHROMA_DIR = os.getenv("CHROMA_DIR", "chroma_movies_db")
 # -----------------------
 df = pd.read_csv(DATA_PATH)
 
-# Thumbnail handling (keep your existing behavior, but be defensive)
-if "thumbnail" in df.columns:
-    df["large_thumbnail"] = df["thumbnail"].astype(str) + "&fife=w800"
-    df["large_thumbnail"] = np.where(
-        df["thumbnail"].isna() | (df["thumbnail"].astype(str).str.strip() == ""),
+# Poster_Url handling (keep your existing behavior, but be defensive)
+if "Poster_Url" in df.columns:
+    df["large_Poster_Url"] = df["Poster_Url"].astype(str) + "&fife=w800"
+    df["large_Poster_Url"] = np.where(
+        df["Poster_Url"].isna() | (df["Poster_Url"].astype(str).str.strip() == ""),
         "cover-not-found.jpg",
-        df["large_thumbnail"],
+        df["large_Poster_Url"],
     )
 else:
-    df["large_thumbnail"] = "cover-not-found.jpg"
+    df["large_Poster_Url"] = "cover-not-found.jpg"
 
 # -----------------------
 # Figure out key columns safely
@@ -194,7 +194,7 @@ def recommend_movies(query: str, category: str, tone: str):
             caption_parts.append(f": {truncated_description}")
 
         caption = " ".join([p for p in caption_parts if str(p).strip()])
-        results.append((row.get("large_thumbnail", "cover-not-found.jpg"), caption))
+        results.append((row.get("large_Poster_Url", "cover-not-found.jpg"), caption))
 
     return results
 
