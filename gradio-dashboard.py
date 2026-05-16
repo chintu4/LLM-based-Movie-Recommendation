@@ -128,7 +128,7 @@ def build_documents(dataframe: pd.DataFrame) -> list[Document]:
         )
     return docs
 
-embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-2")
 
 # Persist so you don't re-embed every run
 if os.path.isdir(CHROMA_DIR) and os.listdir(CHROMA_DIR):
